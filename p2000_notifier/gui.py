@@ -4,6 +4,11 @@ from __future__ import annotations
 import textwrap
 import traceback
 import re
+import subprocess
+import tempfile
+import shutil
+import os
+from datetime import datetime
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -24,8 +29,45 @@ from PySide6.QtWidgets import (
     QStyle,
     QCheckBox,
 )
-from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QFont, QIntValidator
-from PySide6.QtCore import QThread, Signal, QTimer, Qt
+from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QFont, QIntValidator, QColor, QBrush, QRadialGradient
+from PySide6.QtCore import QThread, Signal, QTimer, Qt, QRect
+
+# Application stylesheet: modern dark theme
+STYLE = """
+QWidget {
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #071021, stop:1 #0f2940);
+    color: #e6eef6;
+    font-family: "Segoe UI", "Roboto", "Helvetica", "Arial";
+    font-size: 10pt;
+}
+#titleLabel {
+    font-size: 18pt;
+    font-weight: 700;
+    color: #ffffff;
+}
+QPushButton {
+    background-color: #1e88e5;
+    color: #ffffff;
+    border: none;
+    padding: 6px 10px;
+    border-radius: 8px;
+}
+QPushButton:disabled { background-color: rgba(255,255,255,0.08); color: rgba(255,255,255,0.5); }
+QPushButton#flatButton { background: transparent; color: #cfe9ff; border: none; }
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.06);
+    padding: 6px;
+    border-radius: 6px;
+    color: #e6eef6;
+}
+QTextEdit {
+    background: rgba(0,0,0,0.18);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 6px;
+}
+QLabel { color: #dfefff; }
+"""
 
 from .config import Config
 from .scraper import fetch_latest
@@ -102,8 +144,15 @@ class MainWindow(QWidget):
     def __init__(self, config: Config):
         super().__init__()
         self.setWindowTitle("P2000 Notifier")
+        self.setMinimumSize(720, 520)
         self.config = config
         self.worker: MonitorWorker | None = None
+        self._dark = True
+
+        # apply app-wide style and icon
+        self._apply_style()
+        self.app_icon = QIcon(self._app_pixmap(64))
+        self.setWindowIcon(self.app_icon)
 
         self._build_ui()
         self._load_config_to_ui()
@@ -111,6 +160,28 @@ class MainWindow(QWidget):
 
     def _build_ui(self) -> None:
         form = QFormLayout()
+
+        # Header with app icon and title
+        header_h = QHBoxLayout()
+        logo_lbl = QLabel()
+        logo_pix = self._app_pixmap(56)
+        logo_lbl.setPixmap(logo_pix)
+        logo_lbl.setFixedSize(56, 56)
+        title_v = QVBoxLayout()
+        title_lbl = QLabel("P2000 Pulse")
+        title_lbl.setObjectName("titleLabel")
+        sub_lbl = QLabel("Real-time Dutch emergency alerts")
+        sub_lbl.setStyleSheet("color: rgba(255,255,255,0.78); font-size:10pt;")
+        title_v.addWidget(title_lbl)
+        title_v.addWidget(sub_lbl)
+        header_h.addWidget(logo_lbl)
+        header_h.addLayout(title_v)
+        header_h.addStretch()
+        # theme toggle
+        self.theme_btn = QPushButton("Toggle Theme")
+        self.theme_btn.setObjectName("flatButton")
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        header_h.addWidget(self.theme_btn)
 
         # Region selector (pre-populated) and manual override
         self.region_combo = QComboBox()
@@ -146,6 +217,7 @@ class MainWindow(QWidget):
             self.region_combo.addItem(label, path)
 
         self.load_btn = QPushButton("Load cities")
+        self.load_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
         self.load_btn.clicked.connect(self._on_load_cities)
 
         region_h = QHBoxLayout()
@@ -202,10 +274,13 @@ class MainWindow(QWidget):
 
         btn_h = QHBoxLayout()
         self.save_btn = QPushButton("Save")
+        self.save_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
         self.save_btn.clicked.connect(self._on_save)
         self.start_btn = QPushButton("Start Monitor")
+        self.start_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         self.start_btn.clicked.connect(self._on_start)
         self.stop_btn = QPushButton("Stop Monitor")
+        self.stop_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaStop))
         self.stop_btn.clicked.connect(self._on_stop)
         self.stop_btn.setEnabled(False)
         btn_h.addWidget(self.save_btn)
@@ -214,9 +289,11 @@ class MainWindow(QWidget):
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setFixedHeight(180)
+        self.log_text.setFixedHeight(220)
 
         v = QVBoxLayout(self)
+        v.addLayout(header_h)
+        v.addSpacing(8)
         v.addLayout(form)
         v.addLayout(btn_h)
         v.addWidget(QLabel("Activity / last alert:"))
@@ -224,7 +301,7 @@ class MainWindow(QWidget):
 
     def _create_tray(self) -> None:
         self.tray = QSystemTrayIcon(self)
-        icon = self.style().standardIcon(QStyle.SP_ComputerIcon)
+        icon = getattr(self, 'app_icon', None) or self.style().standardIcon(QStyle.SP_ComputerIcon)
         self.tray.setIcon(icon)
         self.tray.setVisible(True)
 
@@ -239,6 +316,52 @@ class MainWindow(QWidget):
         menu.addAction(show_action)
         menu.addAction(quit_action)
         self.tray.setContextMenu(menu)
+
+    def _apply_style(self) -> None:
+        try:
+            app = QApplication.instance()
+            if app:
+                app.setStyleSheet(STYLE)
+        except Exception:
+            pass
+
+    def _app_pixmap(self, size: int = 64) -> QPixmap:
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        try:
+            painter = QPainter(pix)
+            painter.setRenderHint(QPainter.Antialiasing)
+            rect = pix.rect().adjusted(2, 2, -2, -2)
+            grad = QRadialGradient(rect.center(), rect.width() / 2)
+            grad.setColorAt(0.0, QColor("#4FC3F7"))
+            grad.setColorAt(1.0, QColor("#0288D1"))
+            painter.setBrush(QBrush(grad))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(rect)
+            font = QFont()
+            font.setBold(True)
+            font.setPointSize(int(size / 3))
+            painter.setFont(font)
+            painter.setPen(QColor("white"))
+            painter.drawText(rect, Qt.AlignCenter, "P2")
+            painter.end()
+        except Exception:
+            pass
+        return pix
+
+    def _toggle_theme(self) -> None:
+        try:
+            app = QApplication.instance()
+            if not app:
+                return
+            if getattr(self, '_dark', True):
+                app.setStyleSheet("")
+                self._dark = False
+            else:
+                app.setStyleSheet(STYLE)
+                self._dark = True
+        except Exception:
+            pass
 
     def _load_config_to_ui(self) -> None:
         d = self.config.data
@@ -376,33 +499,70 @@ class MainWindow(QWidget):
 
     def _on_new_alert(self, data: dict) -> None:
         service = (data.get('service_type') or data.get('service') or '').strip()
-        emoji_title = ''
-        if service:
-            emoji_map = {'ambulance': '🚑', 'politie': '🚓', 'brandweer': '🚒'}
-            emoji_title = emoji_map.get(service.lower(), '')
-        title = f"{emoji_title} P2000 {data.get('priority_code','')} - {data.get('city','')}"
-        # format message
-        msg = data.get('message') or data.get('title') or ''
-        self._log(textwrap.shorten(msg, width=800, placeholder='...'))
-        if self.config.data.get('show_notifications', True):
-            # choose a tray message icon by service type
-            if service.lower().startswith('ambulance'):
-                mi = QSystemTrayIcon.Critical
-            elif service.lower().startswith('politie'):
-                mi = QSystemTrayIcon.Warning
-            else:
-                mi = QSystemTrayIcon.Information
-            # set a temporary tray icon representing the service
+        emoji_map = {'ambulance': '🚑', 'politie': '🚓', 'brandweer': '🚒'}
+        emoji = emoji_map.get(service.lower(), '') if service else ''
+        priority = (data.get('priority_code') or '').strip()
+        city = (data.get('city') or '').strip()
+        title = f"{emoji} P2000 {priority} — {city}" if (priority or city) else f"{emoji} P2000 Alert"
+
+        # message and timestamp from scraped data (prefer the absolute ISO timestamp)
+        msg = (data.get('message') or data.get('title') or '').strip()
+        ts = self._format_alert_timestamp(data)
+        # compose a clear body that shows when the report occurred
+        body = f"Reported: {ts}\n\n{msg}"
+
+        # log a concise entry
+        self._log(f"{ts} — {textwrap.shorten(msg, width=500, placeholder='...')}")
+
+        if not self.config.data.get('show_notifications', True):
+            return
+
+        # determine urgency/icon for the tray fallback
+        if service.lower().startswith('ambulance'):
+            mi = QSystemTrayIcon.Critical
+            urgency = 'critical'
+        elif service.lower().startswith('politie'):
+            mi = QSystemTrayIcon.Warning
+            urgency = 'normal'
+        else:
+            mi = QSystemTrayIcon.Information
+            urgency = 'normal'
+
+        # set a temporary tray icon representing the service
+        svc_icon = self._service_icon(service) if service else None
+        if svc_icon:
+            self.tray.setIcon(svc_icon)
+
+        # try to send a rich notification via notify-send (linux), else fallback to Qt
+        icon_path = None
+        try:
+            icon_path = self._create_notification_image(service, title, ts, msg)
+        except Exception:
+            icon_path = None
+
+        sent = False
+        try:
+            sent = self._send_desktop_notification(title, body, icon_path, urgency=urgency, timeout_ms=15000)
+        except Exception:
+            sent = False
+
+        if not sent:
             try:
-                svc_icon = self._service_icon(service) if service else None
-                if svc_icon:
-                    self.tray.setIcon(svc_icon)
-                self.tray.showMessage(title, msg, mi, 15000)
-                # restore default icon after a short delay
+                # Qt fallback
+                self.tray.showMessage(title, body, mi, 15000)
                 QTimer.singleShot(5000, lambda: self.tray.setIcon(self.default_icon))
             except Exception:
-                # fallback to simple notification
-                self.tray.showMessage(title, msg, QSystemTrayIcon.Information, 15000)
+                pass
+
+        # cleanup temp icon file (if any) after a short delay so the notification can use it
+        if icon_path and os.path.exists(icon_path):
+            try:
+                QTimer.singleShot(10000, lambda p=icon_path: os.remove(p) if os.path.exists(p) else None)
+            except Exception:
+                try:
+                    os.remove(icon_path)
+                except Exception:
+                    pass
 
     def _on_load_cities(self) -> None:
         # determine canonical region path from the region selector
@@ -476,25 +636,161 @@ class MainWindow(QWidget):
             pass
 
     def _service_icon(self, service: str) -> QIcon | None:
-        # render a simple emoji-based icon for the given service
+        # render a compact circular icon with a colored background and an emoji
         if not service:
             return None
         emo_map = {'ambulance': '🚑', 'politie': '🚓', 'brandweer': '🚒'}
         emoji = emo_map.get(service.lower(), '')
-        if not emoji:
-            return None
         try:
-            pix = QPixmap(64, 64)
+            size = 64
+            pix = QPixmap(size, size)
             pix.fill(Qt.transparent)
             painter = QPainter(pix)
+            painter.setRenderHint(QPainter.Antialiasing)
+            rect = pix.rect().adjusted(4, 4, -4, -4)
+            color_map = {
+                'ambulance': QColor('#E53935'),
+                'politie': QColor('#1E88E5'),
+                'brandweer': QColor('#F4511E')
+            }
+            bg = color_map.get(service.lower(), QColor('#607D8B'))
+            painter.setBrush(QBrush(bg))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(rect)
             font = QFont()
             font.setPointSize(36)
             painter.setFont(font)
-            painter.drawText(pix.rect(), Qt.AlignCenter, emoji)
+            painter.setPen(QColor('white'))
+            painter.drawText(rect, Qt.AlignCenter, emoji)
             painter.end()
             return QIcon(pix)
         except Exception:
             return None
+
+    def _format_alert_timestamp(self, data: dict) -> str:
+        iso = data.get('absolute_time_str') or ''
+        if iso:
+            try:
+                dt = datetime.fromisoformat(iso)
+                try:
+                    if dt.tzinfo:
+                        dt = dt.astimezone()
+                except Exception:
+                    pass
+                return dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+        date = data.get('date') or ''
+        time = data.get('time') or ''
+        if date and time:
+            return f"{date} {time}"
+        if time:
+            return time
+        if date:
+            return date
+        return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    def _create_notification_image(self, service: str, title: str, ts: str, msg: str, size: tuple[int, int] = (420, 140)) -> str:
+        w, h = size
+        pix = QPixmap(w, h)
+        pix.fill(Qt.transparent)
+        try:
+            painter = QPainter(pix)
+            painter.setRenderHint(QPainter.Antialiasing)
+
+            # subtle background
+            grad = QRadialGradient(pix.rect().center(), max(w, h) / 1.5)
+            grad.setColorAt(0.0, QColor("#0b1a26"))
+            grad.setColorAt(1.0, QColor("#071021"))
+            painter.fillRect(pix.rect(), QBrush(grad))
+
+            # left circular badge
+            circ_size = h - 24
+            circ_rect = QRect(12, 12, circ_size, circ_size)
+            color_map = {
+                'ambulance': QColor('#E53935'),
+                'politie': QColor('#1E88E5'),
+                'brandweer': QColor('#F4511E')
+            }
+            emo_map = {'ambulance': '🚑', 'politie': '🚓', 'brandweer': '🚒'}
+            bg = color_map.get((service or '').lower(), QColor('#607D8B'))
+            emo = emo_map.get((service or '').lower(), '')
+
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(bg))
+            painter.drawEllipse(circ_rect)
+
+            # emoji inside circle
+            font = QFont()
+            font.setPointSize(int(circ_size * 0.45))
+            painter.setFont(font)
+            painter.setPen(QColor('white'))
+            painter.drawText(circ_rect, Qt.AlignCenter, emo)
+
+            # right side: title, timestamp, short message
+            x = circ_rect.right() + 12
+            right_w = w - x - 16
+
+            title_rect = QRect(x, 12, right_w, 30)
+            font_t = QFont()
+            font_t.setBold(True)
+            font_t.setPointSize(12)
+            painter.setFont(font_t)
+            painter.setPen(QColor('#e6eef6'))
+            painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, title)
+
+            # timestamp
+            font_ts = QFont()
+            font_ts.setPointSize(9)
+            painter.setFont(font_ts)
+            painter.setPen(QColor('#bcdcff'))
+            painter.drawText(QRect(x, title_rect.bottom() + 4, right_w, 18), Qt.AlignLeft | Qt.AlignVCenter, ts)
+
+            # message body (shortened)
+            font_b = QFont()
+            font_b.setPointSize(9)
+            painter.setFont(font_b)
+            painter.setPen(QColor('#d5e9ff'))
+            short = textwrap.shorten(msg.replace('\n', ' '), width=180, placeholder='…')
+            painter.drawText(QRect(x, title_rect.bottom() + 26, right_w, h - title_rect.bottom() - 36), Qt.TextWordWrap, short)
+
+            painter.end()
+        except Exception:
+            pass
+
+        tf = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+        tf.close()
+        try:
+            pix.save(tf.name)
+            return tf.name
+        except Exception:
+            try:
+                os.remove(tf.name)
+            except Exception:
+                pass
+            raise
+
+    def _send_desktop_notification(self, title: str, body: str, icon_path: str | None = None, *, urgency: str = 'normal', timeout_ms: int = 15000) -> bool:
+        # Try notify-send (libnotify) first for richer notifications on Linux
+        try:
+            if shutil.which('notify-send'):
+                cmd = [
+                    'notify-send',
+                    title,
+                    body,
+                ]
+                if icon_path:
+                    cmd += ['-i', icon_path]
+                # urgency: critical|normal|low
+                cmd += ['-u', 'critical' if urgency == 'critical' else 'normal']
+                cmd += ['-t', str(timeout_ms)]
+                subprocess.run(cmd, check=False)
+                return True
+        except Exception:
+            pass
+
+        # notify-send not available or failed -> let caller fallback to Qt
+        return False
 
     def _log(self, text: str) -> None:
         from datetime import datetime

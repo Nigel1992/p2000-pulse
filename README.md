@@ -94,8 +94,3 @@ and which desktop environments you validated on.
 ## License
 
 Add a `LICENSE` file to choose an open-source license (MIT recommended).
-
---
-
-If you want, I can also add a screenshot, update `requirements.txt` to include `notify2`,
-or create a small packaging script for easy distribution.

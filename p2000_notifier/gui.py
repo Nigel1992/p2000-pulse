@@ -9,6 +9,8 @@ import tempfile
 import shutil
 import os
 from datetime import datetime
+import webbrowser
+from urllib.parse import quote_plus
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,37 +25,41 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QFormLayout,
     QTextEdit,
-    QSystemTrayIcon,
-    QMenu,
     QMessageBox,
     QStyle,
     QCheckBox,
 )
-from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QFont, QIntValidator, QColor, QBrush, QRadialGradient
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QFont, QIntValidator, QColor, QBrush, QRadialGradient
 from PySide6.QtCore import QThread, Signal, QTimer, Qt, QRect
 
-# Application stylesheet: modern dark theme
+# Application stylesheet: modern dark theme (neutral grey accents)
 STYLE = """
 QWidget {
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #071021, stop:1 #0f2940);
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #0b0b0b, stop:1 #1a1a1a);
     color: #e6eef6;
     font-family: "Segoe UI", "Roboto", "Helvetica", "Arial";
     font-size: 10pt;
 }
 #titleLabel {
-    font-size: 18pt;
-    font-weight: 700;
+    font-size: 20pt;
+    font-weight: 800;
     color: #ffffff;
+    letter-spacing: 0.4px;
+}
+#subtitleLabel {
+    color: rgba(255,255,255,0.78);
+    font-size: 9pt;
 }
 QPushButton {
-    background-color: #1e88e5;
-    color: #ffffff;
-    border: none;
-    padding: 6px 10px;
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #3a3a3a, stop:1 #2d2d2d);
+    color: #e6eef6;
+    border: 1px solid rgba(255,255,255,0.06);
+    padding: 8px 12px;
     border-radius: 8px;
 }
-QPushButton:disabled { background-color: rgba(255,255,255,0.08); color: rgba(255,255,255,0.5); }
-QPushButton#flatButton { background: transparent; color: #cfe9ff; border: none; }
+QPushButton:disabled { background-color: rgba(255,255,255,0.04); color: rgba(255,255,255,0.5); }
+QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #4a4a4a, stop:1 #333333); }
+QPushButton#flatButton { background: transparent; color: #cfe9ff; border: none; padding: 0; }
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background: rgba(255,255,255,0.04);
     border: 1px solid rgba(255,255,255,0.06);
@@ -88,8 +94,8 @@ class MonitorWorker(QThread):
 
     def run(self) -> None:
         import time
-
         self._running = True
+        primed = False
         while self._running:
             try:
                 # support postcode mode (uses /postcode/<NNNN>/) or region/city mode
@@ -102,10 +108,39 @@ class MonitorWorker(QThread):
                         fetch_path = f"postcode/{pc}"
                         data = fetch_latest(fetch_path)
                         if data:
-                            if data.get("id") != self._last_id:
-                                self._last_id = data.get("id")
-                                self.new_alert.emit(data)
-                                self.log.emit(f"New alert: {data.get('message','')[:120]}")
+                            if not primed:
+                                # on startup, don't notify existing/older alerts; prime last_id
+                                iso = data.get("absolute_time_str") or ""
+                                try:
+                                    if iso:
+                                        dt = datetime.fromisoformat(iso)
+                                        try:
+                                            if dt.tzinfo:
+                                                dt = dt.astimezone()
+                                        except Exception:
+                                            pass
+                                        if dt < datetime.now():
+                                            self._last_id = data.get("id")
+                                            primed = True
+                                            self.log.emit("Monitor started — existing alert skipped")
+                                        else:
+                                            if data.get("id") != self._last_id:
+                                                self._last_id = data.get("id")
+                                                self.new_alert.emit(data)
+                                                self.log.emit(f"New alert: {data.get('message','')[:120]}")
+                                            primed = True
+                                    else:
+                                        # no timestamp available — just prime and skip notifying
+                                        self._last_id = data.get("id")
+                                        primed = True
+                                except Exception:
+                                    self._last_id = data.get("id")
+                                    primed = True
+                            else:
+                                if data.get("id") != self._last_id:
+                                    self._last_id = data.get("id")
+                                    self.new_alert.emit(data)
+                                    self.log.emit(f"New alert: {data.get('message','')[:120]}")
                         else:
                             self.log.emit(f"No calls found for postcode {pc}")
                 else:
@@ -118,10 +153,37 @@ class MonitorWorker(QThread):
                         fetch_path = f"{region_path.strip('/')}/{city_path.strip('/')}" if city_path else region_path
                         data = fetch_latest(fetch_path)
                         if data:
-                            if data.get("id") != self._last_id:
-                                self._last_id = data.get("id")
-                                self.new_alert.emit(data)
-                                self.log.emit(f"New alert: {data.get('message','')[:120]}")
+                            if not primed:
+                                iso = data.get("absolute_time_str") or ""
+                                try:
+                                    if iso:
+                                        dt = datetime.fromisoformat(iso)
+                                        try:
+                                            if dt.tzinfo:
+                                                dt = dt.astimezone()
+                                        except Exception:
+                                            pass
+                                        if dt < datetime.now():
+                                            self._last_id = data.get("id")
+                                            primed = True
+                                            self.log.emit("Monitor started — existing alert skipped")
+                                        else:
+                                            if data.get("id") != self._last_id:
+                                                self._last_id = data.get("id")
+                                                self.new_alert.emit(data)
+                                                self.log.emit(f"New alert: {data.get('message','')[:120]}")
+                                            primed = True
+                                    else:
+                                        self._last_id = data.get("id")
+                                        primed = True
+                                except Exception:
+                                    self._last_id = data.get("id")
+                                    primed = True
+                            else:
+                                if data.get("id") != self._last_id:
+                                    self._last_id = data.get("id")
+                                    self.new_alert.emit(data)
+                                    self.log.emit(f"New alert: {data.get('message','')[:120]}")
                         else:
                             self.log.emit("No calls found for region")
             except Exception as e:
@@ -140,6 +202,38 @@ class MonitorWorker(QThread):
         self.wait(2000)
 
 
+class CityLoader(QThread):
+    """Background thread to fetch city lists so the UI stays responsive."""
+    done = Signal(list)
+    error = Signal(str)
+    started_loading = Signal()
+    finished_loading = Signal()
+
+    def __init__(self, region_path: str, timeout: int = 15):
+        super().__init__()
+        self.region_path = region_path
+        self.timeout = timeout
+
+    def run(self) -> None:
+        try:
+            try:
+                self.started_loading.emit()
+            except Exception:
+                pass
+            cities = fetch_region_cities(self.region_path, timeout=self.timeout)
+            self.done.emit(cities)
+        except Exception as e:
+            try:
+                self.error.emit(str(e))
+            except Exception:
+                pass
+        finally:
+            try:
+                self.finished_loading.emit()
+            except Exception:
+                pass
+
+
 class MainWindow(QWidget):
     def __init__(self, config: Config):
         super().__init__()
@@ -156,7 +250,11 @@ class MainWindow(QWidget):
 
         self._build_ui()
         self._load_config_to_ui()
-        self._create_tray()
+        # system tray removed — no tray will be created
+        # store the last notification's map URL so clicks on Qt notifications can open it
+        self._last_map_url: str | None = None
+        # background city loader thread handle
+        self._city_loader: CityLoader | None = None
 
     def _build_ui(self) -> None:
         form = QFormLayout()
@@ -173,15 +271,12 @@ class MainWindow(QWidget):
         sub_lbl = QLabel("Real-time Dutch emergency alerts")
         sub_lbl.setStyleSheet("color: rgba(255,255,255,0.78); font-size:10pt;")
         title_v.addWidget(title_lbl)
+        sub_lbl.setObjectName('subtitleLabel')
         title_v.addWidget(sub_lbl)
         header_h.addWidget(logo_lbl)
         header_h.addLayout(title_v)
         header_h.addStretch()
-        # theme toggle
-        self.theme_btn = QPushButton("Toggle Theme")
-        self.theme_btn.setObjectName("flatButton")
-        self.theme_btn.clicked.connect(self._toggle_theme)
-        header_h.addWidget(self.theme_btn)
+        # theme is fixed to dark; theme toggle removed
 
         # Region selector (pre-populated) and manual override
         self.region_combo = QComboBox()
@@ -292,6 +387,8 @@ class MainWindow(QWidget):
         self.log_text.setFixedHeight(220)
 
         v = QVBoxLayout(self)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(12)
         v.addLayout(header_h)
         v.addSpacing(8)
         v.addLayout(form)
@@ -299,31 +396,11 @@ class MainWindow(QWidget):
         v.addWidget(QLabel("Activity / last alert:"))
         v.addWidget(self.log_text)
 
-    def _create_tray(self) -> None:
-        self.tray = QSystemTrayIcon(self)
-        icon = getattr(self, 'app_icon', None) or self.style().standardIcon(QStyle.SP_ComputerIcon)
-        self.tray.setIcon(icon)
-        self.tray.setVisible(True)
-
-        # remember default icon so we can temporarily swap to service icons
-        self.default_icon = icon
-
-        menu = QMenu()
-        show_action = QAction("Show")
-        show_action.triggered.connect(self.showNormal)
-        quit_action = QAction("Quit")
-        quit_action.triggered.connect(self._on_quit)
-        menu.addAction(show_action)
-        menu.addAction(quit_action)
-        self.tray.setContextMenu(menu)
+    # system tray removed; no tray icon or menu is created
 
     def _apply_style(self) -> None:
-        try:
-            app = QApplication.instance()
-            if app:
-                app.setStyleSheet(STYLE)
-        except Exception:
-            pass
+        # Theming disabled by user request — do not apply any application stylesheet.
+        return
 
     def _app_pixmap(self, size: int = 64) -> QPixmap:
         pix = QPixmap(size, size)
@@ -514,26 +591,57 @@ class MainWindow(QWidget):
         # log a concise entry
         self._log(f"{ts} — {textwrap.shorten(msg, width=500, placeholder='...')}")
 
+        # build a Google Maps link for the report location when possible
+        map_url = None
+        try:
+            lat = data.get('latitude')
+            lon = data.get('longitude')
+            if lat is not None and lon is not None:
+                map_url = f"https://www.google.com/maps/search/?api=1&query={float(lat)},{float(lon)}"
+            else:
+                parts = []
+                addr = (data.get('address') or '').strip()
+                pc = (data.get('postalcode') or '').strip()
+                city = (data.get('city') or '').strip()
+                if addr:
+                    parts.append(addr)
+                if pc:
+                    parts.append(pc)
+                if city:
+                    parts.append(city)
+                if parts:
+                    q = ' '.join(parts)
+                    map_url = "https://www.google.com/maps/search/?api=1&query=" + quote_plus(q)
+                else:
+                    # fallback: use the source link if available
+                    link = data.get('link')
+                    if link:
+                        map_url = link
+        except Exception:
+            map_url = None
+
+        if map_url:
+            # Do not include the raw link in notifications; show a short hint instead
+            body += "\n\nPress OK to open in Google Maps."
+            self._last_map_url = map_url
+        else:
+            self._last_map_url = None
+
         if not self.config.data.get('show_notifications', True):
             return
 
-        # determine urgency/icon for the tray fallback
+        # determine urgency for the notification and a fallback QMessageBox icon
         if service.lower().startswith('ambulance'):
-            mi = QSystemTrayIcon.Critical
             urgency = 'critical'
+            mb_icon = QMessageBox.Critical
         elif service.lower().startswith('politie'):
-            mi = QSystemTrayIcon.Warning
             urgency = 'normal'
+            mb_icon = QMessageBox.Warning
         else:
-            mi = QSystemTrayIcon.Information
             urgency = 'normal'
+            mb_icon = QMessageBox.Information
 
-        # set a temporary tray icon representing the service
-        svc_icon = self._service_icon(service) if service else None
-        if svc_icon:
-            self.tray.setIcon(svc_icon)
-
-        # try to send a rich notification via notify-send (linux), else fallback to Qt
+        # try to send a rich notification (notify2/notify-send); create icon image if possible
         icon_path = None
         try:
             icon_path = self._create_notification_image(service, title, ts, msg)
@@ -548,9 +656,19 @@ class MainWindow(QWidget):
 
         if not sent:
             try:
-                # Qt fallback
-                self.tray.showMessage(title, body, mi, 15000)
-                QTimer.singleShot(5000, lambda: self.tray.setIcon(self.default_icon))
+                # Fallback to a non-modal QMessageBox so the user still sees the alert
+                mb = QMessageBox(self)
+                mb.setWindowTitle(title)
+                mb.setText(body)
+                mb.setIcon(mb_icon)
+                mb.setStandardButtons(QMessageBox.Ok)
+                mb.setModal(False)
+                mb.show()
+                # auto-close after timeout
+                try:
+                    QTimer.singleShot(10000, lambda m=mb: m.close() if m and m.isVisible() else None)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -570,46 +688,76 @@ class MainWindow(QWidget):
         if not region_path:
             QMessageBox.information(self, "Load cities", "Select a region first.")
             return
-        self._log(f"Loading cities for {region_path}...")
-        try:
-            cities = fetch_region_cities(region_path)
-        except Exception as e:
-            QMessageBox.warning(self, "Load cities failed", f"Failed to load cities for {region_path}: {e}")
+        # avoid concurrent loads
+        if getattr(self, '_city_loader', None) and getattr(self._city_loader, 'isRunning', lambda: False)():
+            self._log("City load already in progress")
             return
-        # preserve any typed-in value so a user-entered postal code isn't lost
+
         prev = self.city_combo.currentText() if getattr(self, 'city_combo', None) else ''
-        self.city_combo.clear()
-        if not cities:
-            # no city list found; keep previous typed value if present
-            if prev:
-                self.city_combo.addItem(prev)
-                self.city_combo.setCurrentIndex(0)
-            else:
-                self.city_combo.addItem("All")
-            self._log("No cities found or page parsing failed")
-        else:
-            inserted_prev = False
-            # cities may be a list of (display, path) tuples or plain strings (back-compat)
-            if cities and isinstance(cities[0], (list, tuple)):
-                displays = [d for d, _ in cities]
-                if prev and prev not in displays and prev != "All":
-                    self.city_combo.addItem(prev)
-                    inserted_prev = True
-                for disp, token in cities:
-                    self.city_combo.addItem(disp, token)
-            else:
-                if prev and prev not in cities and prev != "All":
-                    self.city_combo.addItem(prev)
-                    inserted_prev = True
-                for c in cities:
-                    self.city_combo.addItem(c)
-            if inserted_prev:
-                self.city_combo.setCurrentIndex(0)
-            self._log(f"Loaded {len(cities)} cities for {region_path}")
+        # mark UI busy
+        self._log(f"Loading cities for {region_path}...")
+        self.load_btn.setEnabled(False)
+        self.region_combo.setEnabled(False)
+        self.city_combo.setEnabled(False)
+
+        # start background loader
+        loader = CityLoader(region_path)
+        self._city_loader = loader
+        loader.done.connect(lambda cities, rp=region_path, prev=prev: self._on_cities_loaded(cities, rp, prev))
+        loader.error.connect(lambda e, rp=region_path: QMessageBox.warning(self, "Load cities failed", f"Failed to load cities for {rp}: {e}"))
+        loader.started_loading.connect(lambda: None)
+        loader.finished_loading.connect(self._on_cities_load_finished)
+        loader.start()
 
     def _on_city_selected(self, text: str) -> None:
         # nothing to do when a city is selected (address UI removed)
         return
+
+    def _on_cities_loaded(self, cities: list, region_path: str, prev: str) -> None:
+        """Handle the loaded cities list on the main thread."""
+        try:
+            self.city_combo.clear()
+            if not cities:
+                if prev:
+                    self.city_combo.addItem(prev)
+                    self.city_combo.setCurrentIndex(0)
+                else:
+                    self.city_combo.addItem("All")
+                self._log("No cities found or page parsing failed")
+            else:
+                inserted_prev = False
+                if cities and isinstance(cities[0], (list, tuple)):
+                    displays = [d for d, _ in cities]
+                    if prev and prev not in displays and prev != "All":
+                        self.city_combo.addItem(prev)
+                        inserted_prev = True
+                    for disp, token in cities:
+                        self.city_combo.addItem(disp, token)
+                else:
+                    if prev and prev not in cities and prev != "All":
+                        self.city_combo.addItem(prev)
+                        inserted_prev = True
+                    for c in cities:
+                        self.city_combo.addItem(c)
+                if inserted_prev:
+                    self.city_combo.setCurrentIndex(0)
+                self._log(f"Loaded {len(cities)} cities for {region_path}")
+        except Exception as e:
+            self._log(f"Error updating city list: {e}")
+
+    def _on_cities_load_finished(self) -> None:
+        """Re-enable UI after city loading finishes."""
+        try:
+            self.load_btn.setEnabled(True)
+            self.region_combo.setEnabled(True)
+            self.city_combo.setEnabled(True)
+        except Exception:
+            pass
+        finally:
+            try:
+                self._city_loader = None
+            except Exception:
+                pass
 
     def _on_error(self, text: str) -> None:
         self._log("Error: " + text)
@@ -771,7 +919,40 @@ class MainWindow(QWidget):
             raise
 
     def _send_desktop_notification(self, title: str, body: str, icon_path: str | None = None, *, urgency: str = 'normal', timeout_ms: int = 15000) -> bool:
-        # Try notify-send (libnotify) first for richer notifications on Linux
+        # Try DBus-backed Python notify (notify2) with an explicit action if available
+        try:
+            import notify2
+            try:
+                notify2.init("P2000 Notifier")
+                n = notify2.Notification(title, body, icon_path or "")
+                urg_map = {
+                    'low': getattr(notify2, 'URGENCY_LOW', 0),
+                    'normal': getattr(notify2, 'URGENCY_NORMAL', 1),
+                    'critical': getattr(notify2, 'URGENCY_CRITICAL', 2),
+                }
+                n.set_urgency(urg_map.get(urgency, urg_map['normal']))
+                n.set_timeout(int(timeout_ms))
+                url = getattr(self, '_last_map_url', None)
+                if url:
+                    try:
+                        # add an action labelled 'OK' that opens the URL (matches hint text)
+                        def _notify_open_cb(n_obj, action, url=url):
+                            try:
+                                webbrowser.open(url)
+                            except Exception:
+                                pass
+
+                        n.add_action('open', 'OK', _notify_open_cb)
+                    except Exception:
+                        pass
+                n.show()
+                return True
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Fallback: external notify-send (may not support click callbacks)
         try:
             if shutil.which('notify-send'):
                 cmd = [
@@ -781,7 +962,6 @@ class MainWindow(QWidget):
                 ]
                 if icon_path:
                     cmd += ['-i', icon_path]
-                # urgency: critical|normal|low
                 cmd += ['-u', 'critical' if urgency == 'critical' else 'normal']
                 cmd += ['-t', str(timeout_ms)]
                 subprocess.run(cmd, check=False)
@@ -789,8 +969,9 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
-        # notify-send not available or failed -> let caller fallback to Qt
         return False
+
+    # system tray removed; activation/message handlers are not needed
 
     def _log(self, text: str) -> None:
         from datetime import datetime
@@ -801,3 +982,7 @@ class MainWindow(QWidget):
     def _on_quit(self) -> None:
         self._on_stop()
         QApplication.quit()
+
+    def _on_open_maps_triggered(self) -> None:
+        # removed: previously opened Maps from tray menu; kept for compatibility
+        return

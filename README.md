@@ -1,3 +1,5 @@
+[![Discord](https://img.shields.io/badge/Discord-Join%20Us-5865F2?logo=discord&logoColor=white)](https://discord.gg/UbPRh74PzV)
+
 # P2000 Pulse
 
 P2000 Pulse is a lightweight Linux desktop notifier for Dutch P2000 emergency alerts. It

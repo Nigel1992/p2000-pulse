@@ -3,6 +3,8 @@
 
 # P2000 Pulse
 
+[![Vibe Coded](https://img.shields.io/badge/Vibe_Coded-✨-8A2BE2?style=for-the-badge)](https://github.com)
+
 P2000 Pulse is a lightweight Linux desktop notifier for Dutch P2000 emergency alerts. It
 scrapes alarmfase1.nl for region, city or postcode-based incidents and provides a compact
 Qt-based GUI for configuring monitoring and viewing recent alerts.
